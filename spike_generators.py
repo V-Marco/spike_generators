@@ -40,7 +40,7 @@ class GutniskyUnivariateSpikeGenerator:
         for i in range(len(spike_train_autocov)):
             candidates = []
             for rtau_val in possible_rtau:
-                candidates.append(self.compute_rho_tau(rtau_val))
+                candidates.append(self.compute_rho_tau(rtau_val, theta))
             R_tau.append(possible_rtau[np.argmin(np.abs(rho_tau[i] - np.array(candidates)))])
 
         R_tau = np.array(R_tau)
@@ -49,30 +49,41 @@ class GutniskyUnivariateSpikeGenerator:
         A, sigma = self.generate_AR_params(R_tau)
 
         # Generate AR process with given params
-        y = [0] * A.shape[0]
-        for i in range(len(spike_train_autocov)):
-            y.append(np.sum(A * np.array(y[-len(spike_train_autocov) + 1:]).reshape((-1, 1))) + np.random.normal(0, sigma))
+        # The paper uses AR(k), but AR(1) looks more stable
+
+        # Version from the paper: AR(k)
+        #y = [1] * A.shape[0]
+        #for i in range(len(spike_train_autocov)):
+        #    y.append(np.sum(A * np.array(y[-len(spike_train_autocov) + 1:]).reshape((-1, 1))) + np.random.normal(0, sigma))
+
+        # Stable version: AR(1)
+        y = [1]
+        for i in range(1000):
+            yt = y[-1] * A[0] + np.random.normal(0, sigma)
+            y.append(yt[0])
 
         # Threshold
-        x = (np.array(y)[A.shape[0]:] > theta).astype(int)
+        x = (np.array(y) > theta).astype(int)
 
         # Get interspike times
         times = self.get_intespike_times(x)
 
-        return x, times
+        return x, times, y
     
     def get_theta(self, r):
         # Generate y(t) ~ N(0, 1)
         y = np.random.normal(size = 2000)
+        y = np.sort(y)
         dy = np.concatenate([[0], np.diff(y)])
 
-        # Compute the integral representation of r
+        # Compute r by Equation 12, but from -inf to inf
         r_int = 1 / np.sqrt(2 * np.pi) * np.sum(np.exp(-y ** 2 / 2) * dy)
 
-        # Get the integral from y_min to theta
+        # Provided r is the integral from theta to inf
+        # Subtract r from r_int to get the integral from -inf to theta
         si = r_int - r
 
-        # Get intermediate values of r_int
+        # Compute integrals (-inf; -inf + 1), (-inf; -inf + 2), ..., (-inf; -inf + theta)
         r_int_cum = np.cumsum(1 / np.sqrt(2 * np.pi) * np.exp(-y ** 2 / 2) * dy)
 
         # Find theta
@@ -80,9 +91,11 @@ class GutniskyUnivariateSpikeGenerator:
 
         return theta
     
-    def compute_rho_tau(self, r_tau):
+    def compute_rho_tau(self, r_tau, theta):
         # Compute integral from Eqaution 13
         y = np.random.normal(size = 2000)
+        y = np.sort(y)
+        y = y[y > theta]
 
         rho = 0
         const = 1 / (2 * np.pi * np.sqrt(1 - r_tau ** 2))
