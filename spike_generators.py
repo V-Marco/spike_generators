@@ -1,30 +1,34 @@
 import numpy as np
+from scipy.optimize import minimize
 
 class GutniskyUnivariateSpikeGenerator:
     '''
+    Generates a spike train with given autocovariance.
     https://journals.physiology.org/doi/full/10.1152/jn.00518.2009
     '''
 
-    def __init__(self) -> None:
-        pass
-
-    def get_spike_train(self, r, spike_train_autocov):
+    def get_spike_train(self, r, spike_train_autocov, len_spike_train):
         '''
+        Generate a spike train of given length and autocovariance.
+
         Parameters:
         ----------
         r: float
-            Neuron's mean spiking rate.
+            A neuron's mean spiking rate.
 
-        spike_train_autocov: ndarray(shape = len_spike_train)
+        spike_train_autocov: np.ndarray
             Autocovariance of the spike train (c(tau) from the paper).
+
+        len_spike_train: int
+            Length of the spike train to generate.
 
         Returns:
         ----------
-        x: ndarray
-            Spike train of the same length as spike_train_autocov.
+        train: np.ndarray
+            Spike train of the same length as spike_train_autocov (x from the paper).
 
-        times: ndarray
-            Interspike time intervals.
+        y: np.ndarray
+            AR(1) process which is thresholded to obtain train.
         '''
         # Get theta, the threshold for AR process, 
         # by finding: r = integrate(y_min, y_max) - integrate(y_min, theta) | Equation 12
@@ -33,14 +37,15 @@ class GutniskyUnivariateSpikeGenerator:
         # Get rho_tau, autocovariance of bivariate Gaussians, from spike autocovariance
         rho_tau = spike_train_autocov + r ** 2
 
-        # Do a linear search for R_tau
-        R_tau = []
+        # Do a linear search for R_tau, autocovariance of a univariate Gaussian
+        # (Tried scipy.optimize.minimize, unstable)
+        R_tau = [1]
 
         possible_rtau = np.arange(-9, 10) * 0.1
-        for i in range(len(spike_train_autocov)):
+        for i in range(1, len(rho_tau)):
             candidates = []
             for rtau_val in possible_rtau:
-                candidates.append(self.compute_rho_tau(rtau_val, theta))
+                candidates.append(self.compute_rho_tau(rtau_val, theta, i))
             R_tau.append(possible_rtau[np.argmin(np.abs(rho_tau[i] - np.array(candidates)))])
 
         R_tau = np.array(R_tau)
@@ -48,31 +53,33 @@ class GutniskyUnivariateSpikeGenerator:
         # Compute AR params
         A, sigma = self.generate_AR_params(R_tau)
 
-        # Generate AR process with given params
-        # The paper uses AR(k), but AR(1) looks more stable
-
-        # Version from the paper: AR(k)
-        #y = [1] * A.shape[0]
-        #for i in range(len(spike_train_autocov)):
-        #    y.append(np.sum(A * np.array(y[-len(spike_train_autocov) + 1:]).reshape((-1, 1))) + np.random.normal(0, sigma))
-
-        # Stable version: AR(1)
-        y = [1]
-        for i in range(1000):
-            yt = y[-1] * A[0] + np.random.normal(0, sigma)
-            y.append(yt[0])
+        # Generate an AR process with given params
+        y = [1] * A.shape[0]
+        for i in range(len_spike_train + A.shape[0]):
+            y.append(np.sum(A * np.array(y[-A.shape[0]:]).reshape((-1, 1))) + np.random.normal(0, sigma))
+        y = y[A.shape[0]:]
 
         # Threshold
-        x = (np.array(y) > theta).astype(int)
+        train = (np.array(y) > theta).astype(int)
 
-        # Get interspike times
-        times = self.get_intespike_times(x)
-
-        return x, times, y
+        return train, y
     
     def get_theta(self, r):
+        '''
+        Compute theta, the threshold for the AR process (Eq 12).
+
+        Parameters:
+        ----------
+        r: float
+            A neuron's mean spiking rate.
+
+        Returns:
+        ----------
+        theta: float
+            Threshold.
+        '''
         # Generate y(t) ~ N(0, 1)
-        y = np.random.normal(size = 2000)
+        y = np.random.normal(size = 5000)
         y = np.sort(y)
         dy = np.concatenate([[0], np.diff(y)])
 
@@ -91,22 +98,59 @@ class GutniskyUnivariateSpikeGenerator:
 
         return theta
     
-    def compute_rho_tau(self, r_tau, theta):
-        # Compute integral from Eqaution 13
-        y = np.random.normal(size = 2000)
+    def compute_rho_tau(self, R_tau, theta, tau):
+        '''
+        Computes rho(tau), the integral from Equation 13.
+
+        Parameters:
+        ----------
+        R_tau: np.ndarray
+            Autocovariance of the AR process.
+
+        theta: float
+            Lower bound of the integral.
+
+        tau: float
+            Value of tau with which R_tau was computed.
+
+        Returns:
+        ----------
+        rho_tau: float
+            The integral.
+        '''
+        # Compute the integral from Eqaution 13
+        y = np.random.normal(size = 5000)
         y = np.sort(y)
         y = y[y > theta]
 
-        rho = 0
-        const = 1 / (2 * np.pi * np.sqrt(1 - r_tau ** 2))
-        const_exp = 2 * (1 - r_tau ** 2)
+        rho_tau = 0
 
-        for i in range(len(y) - 1):
-            rho += const * np.exp(-(y[i] ** 2 + y[i+1] ** 2 - 2 * r_tau * y[i] * y[i+1]) / const_exp) * (y[i+1] - y[i])
+        for i in range(1, len(y) - tau):
+            const = 1 / (2 * np.pi * np.sqrt(1 - R_tau ** 2))
+            const_exp = 2 * (1 - R_tau ** 2)
+            dadb = (y[i] - y[i-1]) * (y[i + tau] - y[i + tau - 1])
+            rho_tau +=  dadb * const * np.exp(-(y[i] ** 2 + y[i + tau] ** 2 - 2 * R_tau * y[i] * y[i + tau]) / const_exp)
 
-        return rho
+        return rho_tau
     
     def generate_AR_params(self, autocovariance_vector):
+        '''
+        Computes the vector of coefficients and variance of noise of an AR process with the given autocovariance
+        structure.
+
+        Parameters:
+        ----------
+        autocovariance_vector: np.ndarray
+            Autocovariance [1, <yt, yt-1>, <yt, yt-2>, ...]
+
+        Returns:
+        ----------
+        A: np.ndarray
+            Vector of coefficients.
+
+        sigma: float
+            White noise variance.
+        '''
         autocovariance_vector = autocovariance_vector.reshape((-1, 1))
         L = autocovariance_vector.shape[0] - 1
         
@@ -132,6 +176,18 @@ class GutniskyUnivariateSpikeGenerator:
         return A, sigma
     
     def get_intespike_times(self, train):
+        '''
+        A helper function to compute interspike times for a given train.
+
+        Parameters:
+        ----------
+        train: np.ndarray
+            Spike train.
+
+        Returns:
+        times: np.ndarray
+            Interspike intervals.
+        '''
         times = []
 
         t = 0
@@ -146,46 +202,36 @@ class GutniskyUnivariateSpikeGenerator:
 
 class KaulakysUnivariateSpikeGenerator:
     '''
+    Generates interspike intervals with 1/f psd.
     https://www.researchgate.net/profile/Vygintas-Gontis/publication/235753842_Long-range_stochastic_point_processes_with_the_power_law_statistics/links/02e7e52622e0350178000000/Long-range-stochastic-point-processes-with-the-power-law-statistics.pdf?origin=publication_detail
     '''
 
     def __init__(self) -> None:
         pass
 
-    def get_spike_train(self, r, spike_train_length, sigma = 0.01):
+    def get_spike_train(self, r, number_of_intervals, sigma = 0.01):
         '''
         Parameters:
         ----------
         r: float
-            Neuron's mean spiking rate.
+            A neuron's mean spiking rate.
 
-        spike_train_length: int
-            Length of the train.
+        number_of_intervals: int
+            Number of intervals to generate.
 
         sigma: float
-            Standard deviation of white noise.
+            Standard deviation of white noise. Bigger values correspond to y_{t} and y_{t+1} being less similar.
 
         Returns:
         ----------
-        spike_train: ndarray
-            Spike train.
-
-        interevent_time: ndarray
+        intervals: np.ndarray
             Time intervals between spikes
         '''
-        interevent_time = np.zeros(spike_train_length)
-        interevent_time[0] = r
+        intervals = np.zeros(number_of_intervals)
+        intervals[0] = r
 
         # Generate interevent times based on Equation 13
-        for i in range(1, spike_train_length):
-            interevent_time[i] = interevent_time[i-1] - sigma ** 2 / 2 + sigma * np.random.normal(0, 1)
+        for i in range(1, number_of_intervals):
+            intervals[i] = intervals[i-1] - sigma ** 2 / 2 + sigma * np.random.normal(0, 1)
 
-        # Get interspike time
-        spike_train = []
-        for t in interevent_time:
-            interval = [0] * int(t) + [1]
-            spike_train.extend(interval)
-
-        spike_train = np.array(spike_train)[:spike_train_length]
-
-        return spike_train, interevent_time[:sum(spike_train) - 1]
+        return intervals
